@@ -14,7 +14,7 @@ const usage =
     \\
 ;
 
-var log_tty_config: std.io.tty.Config = undefined; // Will be initialized immediately in main
+var log_terminal_mode: std.Io.Terminal.Mode = undefined; // Will be initialized immediately in main
 var log_level: std.log.Level = .warn;
 
 pub const std_options: std.Options = .{
@@ -23,32 +23,37 @@ pub const std_options: std.Options = .{
 
 pub fn logImpl(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(level) > @intFromEnum(log_level)) return;
+    if (@backingInt(level) > @backingInt(log_level)) return;
 
     const prefix = if (scope == .default)
         comptime level.asText() ++ ": "
     else
         comptime level.asText() ++ "(" ++ @tagName(scope) ++ "): ";
     var buffer: [64]u8 = undefined;
-    const stderr = std.debug.lockStderrWriter(&buffer);
-    defer std.debug.unlockStderrWriter();
-    log_tty_config.setColor(stderr, switch (level) {
+    const locked_stderr = std.debug.lockStderr(&buffer);
+    defer std.debug.unlockStderr();
+    const stderr: std.Io.Terminal = .{
+        .writer = &locked_stderr.file_writer.interface,
+        .mode = log_terminal_mode,
+    };
+    stderr.setColor(switch (level) {
         .err => .bright_red,
         .warn => .bright_yellow,
         .info => .bright_blue,
         .debug => .bright_magenta,
     }) catch return;
-    stderr.writeAll(prefix) catch return;
-    log_tty_config.setColor(stderr, .reset) catch return;
-    stderr.print(format ++ "\n", args) catch return;
+    stderr.writer.writeAll(prefix) catch return;
+    stderr.setColor(.reset) catch return;
+    stderr.writer.print(format ++ "\n", args) catch return;
 }
 
-pub fn main() !void {
-    log_tty_config = std.io.tty.detectConfig(std.fs.File.stderr());
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    log_terminal_mode = std.log.defaultTerminalMode();
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -56,12 +61,13 @@ pub fn main() !void {
 
     var suite_paths: std.ArrayList([]const u8) = .empty;
 
-    var args: ArgIterator = .{ .args = try std.process.argsWithAllocator(arena) };
+    var args: ArgIterator = .{ .args = try init.minimal.args.iterateAllocator(arena) };
+    defer args.deinit();
     _ = args.next();
     while (args.next()) |arg| {
         switch (arg) {
             .option => |option| if (option.is('h', "help")) {
-                try std.fs.File.stdout().writeAll(usage);
+                try std.Io.File.stdout().writeStreamingAll(io, usage);
                 std.process.exit(0);
             } else if (option.is('v', "verbose")) {
                 log_level = switch (log_level) {
@@ -83,13 +89,13 @@ pub fn main() !void {
         }
     }
 
-    var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    var gpa_state: std.heap.DebugAllocator(.{}) = .{};
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 
     var results: Results = .{};
     for (suite_paths.items) |suite_path| {
-        runFile(gpa, suite_path, &results) catch |err|
+        runFile(gpa, io, suite_path, &results) catch |err|
             results.err("running suite {s}: {}", .{ suite_path, err });
     }
     std.debug.print("{} passed, {} failed, {} skipped\n", .{ results.passed, results.failed, results.skipped });
@@ -134,10 +140,10 @@ const Results = struct {
 
 const max_file_size = 2 * 1024 * 1024;
 
-fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
-    var dir = try std.fs.cwd().openDir(std.fs.path.dirname(path) orelse ".", .{});
-    defer dir.close();
-    const data = try dir.readFileAlloc(gpa, std.fs.path.basename(path), max_file_size);
+fn runFile(gpa: Allocator, io: std.Io, path: []const u8, results: *Results) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(path) orelse ".", .{});
+    defer dir.close(io);
+    const data = try dir.readFileAlloc(io, std.fs.path.basename(path), gpa, .limited(max_file_size));
     defer gpa.free(data);
     var data_reader: std.Io.Reader = .fixed(data);
     var streaming_reader: xml.Reader.Streaming = .init(gpa, &data_reader, .{});
@@ -146,10 +152,10 @@ fn runFile(gpa: Allocator, path: []const u8, results: *Results) !void {
 
     try reader.skipProlog();
     if (!std.mem.eql(u8, "TESTCASES", reader.elementName())) return error.InvalidTest;
-    try runSuite(gpa, dir, reader, results);
+    try runSuite(gpa, io, dir, reader, results);
 }
 
-fn runSuite(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Results) !void {
+fn runSuite(gpa: Allocator, io: std.Io, dir: std.Io.Dir, reader: *xml.Reader, results: *Results) !void {
     if (reader.attributeIndex("PROFILE")) |profile_attr| {
         log.info("suite: {s}", .{try reader.attributeValue(profile_attr)});
     }
@@ -157,9 +163,9 @@ fn runSuite(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resu
     while (true) {
         switch (try reader.read()) {
             .element_start => if (std.mem.eql(u8, reader.elementName(), "TESTCASES")) {
-                try runSuite(gpa, dir, reader, results);
+                try runSuite(gpa, io, dir, reader, results);
             } else if (std.mem.eql(u8, reader.elementName(), "TEST")) {
-                try runTest(gpa, dir, reader, results);
+                try runTest(gpa, io, dir, reader, results);
             } else {
                 return error.InvalidTest;
             },
@@ -169,7 +175,7 @@ fn runSuite(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resu
     }
 }
 
-fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Results) !void {
+fn runTest(gpa: Allocator, io: std.Io, dir: std.Io.Dir, reader: *xml.Reader, results: *Results) !void {
     const @"type" = type: {
         const index = reader.attributeIndex("TYPE") orelse return error.InvalidTest;
         break :type std.meta.stringToEnum(TestType, try reader.attributeValue(index)) orelse return error.InvalidTest;
@@ -202,14 +208,14 @@ fn runTest(gpa: Allocator, dir: std.fs.Dir, reader: *xml.Reader, results: *Resul
     const input = input: {
         const index = reader.attributeIndex("URI") orelse return error.InvalidTest;
         const path = try reader.attributeValue(index);
-        break :input dir.readFileAlloc(gpa, path, max_file_size) catch |err|
+        break :input dir.readFileAlloc(io, path, gpa, .limited(max_file_size)) catch |err|
             return results.err("{s}: reading input file: {s}: {}", .{ id, path, err });
     };
     defer gpa.free(input);
     const output = output: {
         const index = reader.attributeIndex("OUTPUT") orelse break :output null;
         const path = try reader.attributeValue(index);
-        break :output dir.readFileAlloc(gpa, path, max_file_size) catch |err|
+        break :output dir.readFileAlloc(io, path, gpa, .limited(max_file_size)) catch |err|
             return results.err("{s}: reading output file: {s}: {}", .{ id, path, err });
     };
     defer if (output) |o| gpa.free(o);
@@ -354,7 +360,7 @@ const TestType = enum {
 
 // Inspired by https://github.com/judofyr/parg
 const ArgIterator = struct {
-    args: std.process.ArgIterator,
+    args: std.process.Args.Iterator,
     state: union(enum) {
         normal,
         short: []const u8,

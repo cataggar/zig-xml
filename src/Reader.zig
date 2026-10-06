@@ -521,8 +521,8 @@ inline fn utf16BytesLiteral(comptime endian: std.builtin.Endian, comptime utf8: 
 }
 
 test "streaming with extremely long element name" {
-    const name = "a" ** 65536;
-    var bytes: std.Io.Reader = .fixed("<" ++ name ++ "/>");
+    const name = &@as([65536]u8, @splat('a'));
+    var bytes: std.Io.Reader = .fixed("<" ++ name.* ++ "/>");
     var streaming_reader: xml.Reader.Streaming = .init(std.testing.allocator, &bytes, .{});
     defer streaming_reader.deinit();
     const reader = &streaming_reader.interface;
@@ -2144,7 +2144,7 @@ fn addAttributeValueString(reader: *Reader, raw_value: []const u8) !StringIndex 
             else => |b| try reader.strings.append(reader.gpa, b),
         }
     }
-    return @enumFromInt(start);
+    return @fromBackingInt(@intCast(start));
 }
 
 fn checkElementEnd(reader: *Reader) !void {
@@ -2558,7 +2558,7 @@ fn shift(reader: *Reader) !void {
             prefix_bindings.deinit(reader.gpa);
         }
         const element_name_start = reader.element_names.pop().?;
-        reader.strings.shrinkRetainingCapacity(@intFromEnum(element_name_start));
+        reader.strings.shrinkRetainingCapacity(@backingInt(element_name_start));
     }
 }
 
@@ -2610,7 +2610,7 @@ const StringIndexAdapter = struct {
 
     pub fn eql(ctx: @This(), a: []const u8, b: StringIndex, b_index: usize) bool {
         _ = b_index;
-        const b_val = std.mem.sliceTo(ctx.strings[@intFromEnum(b)..], 0);
+        const b_val = std.mem.sliceTo(ctx.strings[@backingInt(b)..], 0);
         return std.mem.eql(u8, a, b_val);
     }
 };
@@ -2620,9 +2620,9 @@ fn addString(reader: *Reader, s: []const u8) !StringIndex {
     reader.strings.appendAssumeCapacity(0);
     const start = reader.strings.items.len;
     reader.strings.appendSliceAssumeCapacity(s);
-    return @enumFromInt(start);
+    return @fromBackingInt(@intCast(start));
 }
 
 fn string(reader: *const Reader, index: StringIndex) []const u8 {
-    return std.mem.sliceTo(reader.strings.items[@intFromEnum(index)..], 0);
+    return std.mem.sliceTo(reader.strings.items[@backingInt(index)..], 0);
 }

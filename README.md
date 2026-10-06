@@ -1,7 +1,6 @@
 # zig-xml
 
-zig-xml is an XML library for Zig, currently supporting Zig 0.15.0 and the
-latest master at the time of writing.
+zig-xml is an XML library for Zig, currently supporting Zig 0.17.0.
 
 See the documentation in the code for more information about the available APIs
 (start in `xml.zig`). Autodocs are also published to GitHub Pages:
@@ -30,8 +29,8 @@ The `xmlconf` directory additionally contains a runner for the [W3C XML
 Conformance Test Suite](https://www.w3.org/XML/Test/). Running `zig build test`
 in that directory will fetch the test suite distribution tarball and run the
 tests within. Due to features missing in the current parser implementation (DTD
-support), many tests are currently skipped. At the time of writing, 250 tests
-pass, and 924 are skipped due to unsupported features.
+support), many tests are currently skipped. At the time of writing, 281 tests
+pass, none fail, and 893 are skipped due to unsupported features.
 
 ## Fuzzing
 
